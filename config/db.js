@@ -40,6 +40,7 @@ async function resolveMongoSrvUri(uri) {
 const connectDB = async () => {
     try {
         const uri = process.env.MONGO_URI;
+        if (!uri) throw new Error("MONGO_URI is not configured.");
         const connectionString = uri?.startsWith("mongodb+srv://")
             ? await resolveMongoSrvUri(uri)
             : uri;
@@ -48,6 +49,7 @@ const connectDB = async () => {
         console.log("MongoDB connected successfully");
     } catch (error) {
         console.error("MongoDB connection failed:", error.message);
+        throw error;
     }
 };
 

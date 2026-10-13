@@ -1,6 +1,9 @@
 const Order = require("../models/Order");
+const Product = require("../models/Product");
+const mongoose = require("mongoose");
 const crypto = require("node:crypto");
 const { sendOrderInvoice } = require("../utils/mailer");
+const { normalizeInventory, buildVerifiedOrderItems } = require("../utils/orderValidation");
 
 const hashTrackingToken = token => crypto.createHash("sha256").update(token).digest();
 
@@ -37,7 +40,7 @@ const serializeTrackedOrder = order => ({
 
 const createOrder = async (req, res) => {
     try {
-        const { invoice, customer, items, trackingToken } = req.body;
+        const { invoice, customer, items, trackingToken } = req.body || {};
         const customerName = String(customer?.name || "").trim();
         const customerPhone = String(customer?.phone || "").trim();
         const customerEmail = String(customer?.email || "").trim().toLowerCase();
@@ -50,18 +53,6 @@ const createOrder = async (req, res) => {
         }
         const note = String(req.body.note || "").trim();
         if (note.length > 1000) return res.status(400).json({ message: "Order notes must be 1000 characters or fewer." });
-
-        const normalizedItems = items.map(item => ({
-            productId: String(item.productId || "").slice(0, 100),
-            name: String(item.name || "").trim().slice(0, 150),
-            price: Number(item.price),
-            qty: Number(item.qty),
-            size: String(item.size || "N/A").slice(0, 40),
-            color: String(item.color || "N/A").slice(0, 60)
-        }));
-        if (normalizedItems.some(item => !item.name || !Number.isFinite(item.price) || item.price < 0 || item.price > 1000000 || !Number.isInteger(item.qty) || item.qty < 1 || item.qty > 100)) {
-            return res.status(400).json({ message: "Order items contain invalid names, prices, or quantities." });
-        }
 
         const existing = await Order.findOne({ invoice }).select("+trackingTokenHash");
         if (existing) {
@@ -81,19 +72,69 @@ const createOrder = async (req, res) => {
             return res.status(200).json({ order: serializeOrder(existing) });
         }
 
-        const total = normalizedItems.reduce((sum, item) => sum + item.price * item.qty, 0);
-        const order = await Order.create({
-            invoice: String(invoice).trim(),
-            customer: { name: customerName, phone: customerPhone, email: customerEmail, address: customerAddress.slice(0, 300) },
-            delivery: String(req.body.delivery || "Not specified").slice(0, 80),
-            payment: String(req.body.payment || "Not specified").slice(0, 80),
-            note,
-            items: normalizedItems,
-            total,
-            channel: "WhatsApp",
-            trackingTokenHash: hashTrackingToken(trackingToken).toString("hex")
-        });
+        if (items.some(item => !item || !mongoose.isValidObjectId(item.productId) || !String(item.size ?? "").trim())) {
+            return res.status(400).json({ message: "Each order item must include a valid product and size." });
+        }
+
+        const productIds = [...new Set(items.map(item => String(item.productId)))];
+        let order;
         let invoiceEmailSent = null;
+        const session = await mongoose.startSession();
+        try {
+            await session.withTransaction(async () => {
+                const catalogProducts = await Product.find({ _id: { $in: productIds } }).session(session).lean();
+                const normalizedItems = buildVerifiedOrderItems(items, catalogProducts);
+                const quantitiesByProduct = new Map();
+                normalizedItems.forEach(item => {
+                    const requested = quantitiesByProduct.get(item.productId) || new Map();
+                    requested.set(item.size.toLowerCase(), (requested.get(item.size.toLowerCase()) || 0) + item.qty);
+                    quantitiesByProduct.set(item.productId, requested);
+                });
+
+                for (const product of catalogProducts) {
+                    const requested = quantitiesByProduct.get(String(product._id));
+                    if (!requested) continue;
+                    const inventory = normalizeInventory(product.sizes);
+                    for (const [size, quantity] of requested) {
+                        const stockEntry = inventory.find(entry => entry.size.toLowerCase() === size);
+                        if (!stockEntry || stockEntry.stock < quantity) {
+                            const error = new Error(`Not enough stock remains for ${product.name} in size ${stockEntry?.size || size}. Refresh your cart and try again.`);
+                            error.status = 409;
+                            throw error;
+                        }
+                        stockEntry.stock -= quantity;
+                    }
+
+                    const reservation = await Product.updateOne(
+                        { _id: product._id, available: true, sizes: product.sizes },
+                        { $set: { sizes: inventory } },
+                        { session }
+                    );
+                    if (reservation.modifiedCount !== 1) {
+                        const error = new Error("Inventory changed while placing your order. Refresh your cart and try again.");
+                        error.status = 409;
+                        throw error;
+                    }
+                }
+
+                const total = normalizedItems.reduce((sum, item) => sum + item.price * item.qty, 0);
+                const [createdOrder] = await Order.create([{
+                    invoice: String(invoice).trim(),
+                    customer: { name: customerName, phone: customerPhone, email: customerEmail, address: customerAddress.slice(0, 300) },
+                    delivery: String(req.body.delivery || "Not specified").slice(0, 80),
+                    payment: String(req.body.payment || "Not specified").slice(0, 80),
+                    note,
+                    items: normalizedItems,
+                    total,
+                    channel: "Storefront",
+                    trackingTokenHash: hashTrackingToken(trackingToken).toString("hex")
+                }], { session });
+                order = createdOrder;
+            });
+        } finally {
+            await session.endSession();
+        }
+
         if (customerEmail) {
             try {
                 invoiceEmailSent = await sendOrderInvoice(order, trackingToken);
@@ -104,6 +145,15 @@ const createOrder = async (req, res) => {
         }
         res.status(201).json({ order: serializeOrder(order), invoiceEmailSent });
     } catch (error) {
+        if (error.status) {
+            return res.status(error.status).json({
+                message: error.message,
+                ...(error.code ? { code: error.code } : {}),
+                ...(error.productId ? { productId: error.productId } : {}),
+                ...(error.productName ? { productName: error.productName } : {}),
+                ...(Number.isFinite(error.currentPrice) ? { currentPrice: error.currentPrice } : {})
+            });
+        }
         if (error.code === 11000) {
             const order = await Order.findOne({ invoice: req.body.invoice }).select("+trackingTokenHash");
             if (order && trackingTokenMatches(req.body.trackingToken, order.trackingTokenHash)) {

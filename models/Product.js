@@ -25,12 +25,7 @@ const productSchema = new mongoose.Schema(
             min: 0
         },
 
-        sizes: [
-            {
-                type: String,
-                trim: true
-            }
-        ],
+        sizes: [mongoose.Schema.Types.Mixed],
 
         image: {
             type: String,

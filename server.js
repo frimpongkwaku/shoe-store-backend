@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
 const { rateLimit } = require("express-rate-limit");
@@ -22,9 +23,6 @@ const allowedOrigins = new Set([
     ...(process.env.NODE_ENV === "production" ? [] : ["null"]),
     ...(process.env.CORS_ORIGINS || "").split(",").map(origin => origin.trim()).filter(Boolean)
 ]);
-
-// Connect to MongoDB
-connectDB();
 
 // Middleware
 app.disable("x-powered-by");
@@ -58,6 +56,14 @@ app.get("/", (req, res) => {
     res.send("Shoe Store Backend is running!");
 });
 
+app.get("/health", (req, res) => {
+    const databaseReady = mongoose.connection.readyState === 1;
+    res.status(databaseReady ? 200 : 503).json({
+        status: databaseReady ? "ok" : "unavailable",
+        database: databaseReady ? "connected" : "disconnected"
+    });
+});
+
 app.use((error, req, res, next) => {
     if (error instanceof SyntaxError && error.status === 400 && "body" in error) {
         return res.status(400).json({ message: "Request body must contain valid JSON." });
@@ -69,7 +75,14 @@ app.use((error, req, res, next) => {
     return res.status(500).json({ message: "The request could not be completed." });
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+async function startServer() {
+    await connectDB();
+    app.listen(PORT, () => {
+        console.log(`Server listening on port ${PORT}`);
+    });
+}
+
+startServer().catch(error => {
+    console.error("Server startup failed:", error.message);
+    process.exit(1);
 });
