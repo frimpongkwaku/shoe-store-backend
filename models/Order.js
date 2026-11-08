@@ -10,6 +10,8 @@ const orderSchema = new mongoose.Schema({
     },
     delivery: { type: String, default: "Not specified" },
     payment: { type: String, default: "Not specified" },
+    paymentStatus: { type: String, enum: ["Due on delivery", "Pending", "Paid"], default: "Pending" },
+    paymentReference: { type: String, trim: true, default: "" },
     note: { type: String, default: "" },
     items: [{
         productId: String,

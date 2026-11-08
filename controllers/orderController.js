@@ -21,6 +21,8 @@ const serializeOrder = order => ({
     customer: order.customer,
     delivery: order.delivery,
     payment: order.payment,
+    paymentStatus: order.paymentStatus,
+    paymentReference: order.paymentReference,
     note: order.note,
     items: order.items,
     total: order.total,
@@ -33,6 +35,7 @@ const serializeTrackedOrder = order => ({
     createdAt: order.createdAt,
     delivery: order.delivery,
     payment: order.payment,
+    paymentStatus: order.paymentStatus,
     items: order.items,
     total: order.total,
     status: order.status
@@ -41,6 +44,10 @@ const serializeTrackedOrder = order => ({
 const createOrder = async (req, res) => {
     try {
         const { invoice, customer, items, trackingToken } = req.body || {};
+        const payment = String(req.body?.payment || "Pay on delivery").trim();
+        if (payment === "Paystack" && (req.paymentVerified !== true || typeof req.body.paymentReference !== "string")) {
+            return res.status(403).json({ message: "Verify the Paystack payment before creating this order." });
+        }
         const customerName = String(customer?.name || "").trim();
         const customerPhone = String(customer?.phone || "").trim();
         const customerEmail = String(customer?.email || "").trim().toLowerCase();
@@ -56,6 +63,9 @@ const createOrder = async (req, res) => {
 
         const existing = await Order.findOne({ invoice }).select("+trackingTokenHash");
         if (existing) {
+            if (existing.payment !== payment || (payment === "Paystack" && existing.paymentReference !== req.body.paymentReference)) {
+                return res.status(409).json({ message: "This invoice already belongs to a different payment." });
+            }
             if (existing.trackingTokenHash) {
                 if (!trackingTokenMatches(trackingToken, existing.trackingTokenHash)) {
                     return res.status(409).json({ message: "This invoice belongs to a different order." });
@@ -122,7 +132,9 @@ const createOrder = async (req, res) => {
                     invoice: String(invoice).trim(),
                     customer: { name: customerName, phone: customerPhone, email: customerEmail, address: customerAddress.slice(0, 300) },
                     delivery: String(req.body.delivery || "Not specified").slice(0, 80),
-                    payment: String(req.body.payment || "Not specified").slice(0, 80),
+                    payment: payment.slice(0, 80),
+                    paymentStatus: payment === "Paystack" ? "Paid" : payment === "Pay on delivery" || payment === "Cash on Delivery" ? "Due on delivery" : "Pending",
+                    paymentReference: payment === "Paystack" ? req.body.paymentReference : "",
                     note,
                     items: normalizedItems,
                     total,
@@ -156,7 +168,13 @@ const createOrder = async (req, res) => {
         }
         if (error.code === 11000) {
             const order = await Order.findOne({ invoice: req.body.invoice }).select("+trackingTokenHash");
-            if (order && trackingTokenMatches(req.body.trackingToken, order.trackingTokenHash)) {
+            const requestedPayment = String(req.body?.payment || "Pay on delivery").trim();
+            if (
+                order &&
+                order.payment === requestedPayment &&
+                (requestedPayment !== "Paystack" || order.paymentReference === req.body.paymentReference) &&
+                trackingTokenMatches(req.body.trackingToken, order.trackingTokenHash)
+            ) {
                 return res.status(200).json({ order: serializeOrder(order) });
             }
             return res.status(409).json({ message: "This invoice belongs to a different order." });

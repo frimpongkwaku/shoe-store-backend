@@ -65,7 +65,7 @@ const buildVerifiedOrderItems = (requestedItems, products) => {
 
         const availableColors = Array.isArray(product.colors) ? product.colors.map(color => String(color).trim()).filter(Boolean) : [];
         const requestedColor = String(item.color ?? "").trim();
-        let color = "Default";
+        let color = availableColors.length ? "" : "No color option";
         if (availableColors.length) {
             color = availableColors.find(option => option.toLowerCase() === requestedColor.toLowerCase());
             if (!color) {
