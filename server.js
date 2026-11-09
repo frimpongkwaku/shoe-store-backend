@@ -25,13 +25,24 @@ const allowedOrigins = new Set([
     ...(process.env.CORS_ORIGINS || "").split(",").map(origin => origin.trim()).filter(Boolean)
 ]);
 
+function isAllowedDevelopmentOrigin(origin) {
+    if (process.env.NODE_ENV === "production") return false;
+
+    try {
+        const url = new URL(origin);
+        return url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname);
+    } catch {
+        return false;
+    }
+}
+
 // Middleware
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({
     origin(origin, callback) {
-        if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+        if (!origin || allowedOrigins.has(origin) || isAllowedDevelopmentOrigin(origin)) return callback(null, true);
         return callback(new Error("Origin is not allowed by CORS."));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
